@@ -2,61 +2,140 @@ name: Build MLBB AI Draft APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Kod Repository
         uses: actions/checkout@v4
 
-      - name: Unzip Dan Cari Projek Sebenar
+      - name: Simpan konfigurasi Gradle Java 17
+        shell: bash
         run: |
-          ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
+          set -euo pipefail
+
+          if [ ! -f "app/build.gradle.kts" ]; then
+            echo "::error::Fail app/build.gradle.kts tidak ditemui sebelum unzip."
+            exit 1
+          fi
+
+          mkdir -p /tmp
+          cp "app/build.gradle.kts" "/tmp/fixed-app-build.gradle.kts"
+
+      - name: Unzip dan pulihkan konfigurasi Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name "*.zip" -print -quit)"
+
           if [ -n "$ZIP_FILE" ]; then
-            rm -rf temp_unzip && mkdir temp_unzip
+            rm -rf temp_unzip
+            mkdir -p temp_unzip
             unzip -o "$ZIP_FILE" -d temp_unzip
             cp -r temp_unzip/. .
-            rm -rf temp_unzip "$ZIP_FILE"
+            rm -rf temp_unzip
+            rm -f "$ZIP_FILE"
           fi
-          PROJECT_DIR=$(find . -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1 | xargs dirname 2>/dev/null || true)
+
+          # Pulihkan konfigurasi Java 17 supaya versi lama dalam ZIP
+          # tidak menimpa app/build.gradle.kts yang betul.
+          mkdir -p app
+          cp "/tmp/fixed-app-build.gradle.kts" "app/build.gradle.kts"
+
+          # Selaraskan semua tetapan target Java/Kotlin dalam fail Gradle.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          for path in Path(".").rglob("*"):
+              if not path.is_file():
+                  continue
+              if not (path.name.endswith(".gradle") or path.name.endswith(".gradle.kts")):
+                  continue
+
+              text = path.read_text(encoding="utf-8")
+              updated = text.replace(
+                  "JavaVersion.VERSION_1_8",
+                  "JavaVersion.VERSION_17",
+              )
+              updated = updated.replace("JVM_1_8", "JVM_17")
+              updated = re.sub(
+                  r'(\bjvmTarget\b[^\n]*?)"1\.8"',
+                  lambda match: match.group(1) + '"17"',
+                  updated,
+              )
+
+              if updated != text:
+                  path.write_text(updated, encoding="utf-8")
+                  print(f"Updated JVM target: {path}")
+          PY
+
+          PROJECT_DIR="$(find . -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit | xargs -r dirname)"
+
           if [ -z "$PROJECT_DIR" ]; then
-            PROJECT_DIR=$(find . -name "build.gradle" -o -name "build.gradle.kts" | head -n 1 | xargs dirname 2>/dev/null || true)
+            PROJECT_DIR="$(find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -print -quit | xargs -r dirname)"
           fi
+
           if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
             PROJECT_DIR="."
           fi
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Building project in: $PROJECT_DIR"
           ls -la "$PROJECT_DIR"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Betulkan Gradle Wrapper Ke 8.9
+      - name: Tetapkan Gradle Wrapper kepada 8.9
+        shell: bash
         run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
-          WRAPPER_FILE=$(find . -name "gradle-wrapper.properties" | head -n 1)
+
+          WRAPPER_FILE="$(find . -type f -name "gradle-wrapper.properties" -print -quit)"
+
           if [ -n "$WRAPPER_FILE" ]; then
-            sed -i 's|gradle-.*-all.zip|gradle-8.9-all.zip|g' "$WRAPPER_FILE"
-            sed -i 's|gradle-.*-bin.zip|gradle-8.9-bin.zip|g' "$WRAPPER_FILE"
-            cat "$WRAPPER_FILE"
+            python3 - "$WRAPPER_FILE" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+          updated = re.sub(
+              r"(distributionUrl=.*gradle-)[^/]+-(all|bin)\.zip",
+              r"\g<1>8.9-\2.zip",
+              text,
+          )
+          path.write_text(updated, encoding="utf-8")
+          print(path.read_text(encoding="utf-8"))
+          PY
           fi
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.9'
+          gradle-version: "8.9"
 
       - name: Build Debug APK
+        shell: bash
         run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
             ./gradlew assembleDebug --stacktrace --no-daemon
@@ -64,8 +143,24 @@ jobs:
             gradle assembleDebug --stacktrace --no-daemon
           fi
 
-      - name: Cari Dan Upload APK
+      - name: Cari APK
+        shell: bash
         run: |
-          find . -name "*.apk"
-          APK_PATH=$(find . -name "app-debug.apk" | head -n 1)
-          echo "APK_PATH=$APK_PATH"
+          set -euo pipefail
+
+          APK_PATH="$(find "$PROJECT_DIR" -type f -name "app-debug.apk" -print -quit)"
+
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::app-debug.apk tidak ditemui selepas build."
+            exit 1
+          fi
+
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "APK ditemui: $APK_PATH"
+
+      - name: Muat naik APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlbb-ai-draft-assistant-debug-apk
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
