@@ -1,0 +1,442 @@
+name: Build MLBB AI Draft APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Kod Repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle 8.5
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Jana Semua Fail Projek Secara Tepat (Python Generator)
+        shell: python
+        run: |
+          import os, textwrap
+
+          def write_file(path, content):
+              dir_name = os.path.dirname(path)
+              if dir_name:
+                  os.makedirs(dir_name, exist_ok=True)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(textwrap.dedent(content).lstrip())
+
+          write_file("gradle.properties", """
+              org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+              android.useAndroidX=true
+              android.nonTransitiveRClass=true
+          """)
+
+          write_file("settings.gradle.kts", """
+              pluginManagement {
+                  repositories {
+                      google()
+                      mavenCentral()
+                      gradlePluginPortal()
+                  }
+              }
+              dependencyResolutionManagement {
+                  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+                  repositories {
+                      google()
+                      mavenCentral()
+                  }
+              }
+              rootProject.name = "MLBB-AI-Draft-Assistant"
+              include(":app")
+          """)
+
+          write_file("build.gradle.kts", """
+              plugins {
+                  id("com.android.application") version "8.2.2" apply false
+                  id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+                  id("com.google.devtools.ksp") version "1.9.22-1.0.17" apply false
+              }
+          """)
+
+          write_file("app/build.gradle.kts", """
+              import java.util.Properties
+
+              plugins {
+                  id("com.android.application")
+                  id("org.jetbrains.kotlin.android")
+                  id("com.google.devtools.ksp")
+              }
+
+              val localProps = Properties().apply {
+                  val file = rootProject.file("local.properties")
+                  if (file.exists()) load(file.inputStream())
+              }
+
+              android {
+                  namespace = "com.mlbb.aidraft"
+                  compileSdk = 34
+
+                  defaultConfig {
+                      applicationId = "com.mlbb.aidraft"
+                      minSdk = 26
+                      targetSdk = 34
+                      versionCode = 1
+                      versionName = "1.0.0-mvp"
+
+                      val geminiKey = localProps.getProperty("GEMINI_API_KEY") ?: ""
+                      buildConfigField("String", "GEMINI_API_KEY", "\\"\\$geminiKey\\"")
+                  }
+
+                  buildFeatures {
+                      compose = true
+                      buildConfig = true
+                  }
+
+                  composeOptions {
+                      kotlinCompilerExtensionVersion = "1.5.10"
+                  }
+
+                  compileOptions {
+                      sourceCompatibility = JavaVersion.VERSION_17
+                      targetCompatibility = JavaVersion.VERSION_17
+                  }
+
+                  kotlinOptions {
+                      jvmTarget = "17"
+                  }
+              }
+
+              dependencies {
+                  val composeBom = platform("androidx.compose:compose-bom:2024.02.01")
+                  implementation(composeBom)
+                  implementation("androidx.compose.ui:ui")
+                  implementation("androidx.compose.ui:ui-tooling-preview")
+                  implementation("androidx.compose.material3:material3")
+                  implementation("androidx.activity:activity-compose:1.8.2")
+                  implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+                  implementation("androidx.lifecycle:lifecycle-service:2.7.0")
+                  implementation("androidx.savedstate:savedstate-ktx:1.2.1")
+
+                  val roomVersion = "2.6.1"
+                  implementation("androidx.room:room-runtime:\\$roomVersion")
+                  implementation("androidx.room:room-ktx:\\$roomVersion")
+                  ksp("androidx.room:room-compiler:\\$roomVersion")
+
+                  implementation("com.google.mlkit:text-recognition:16.0.0")
+                  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+                  implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
+                  implementation("com.google.code.gson:gson:2.10.1")
+                  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+              }
+          """)
+
+          write_file("app/src/main/AndroidManifest.xml", """
+              <?xml version="1.0" encoding="utf-8"?>
+              <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+                  <uses-permission android:name="android.permission.INTERNET" />
+                  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+                  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+                  <application
+                      android:allowBackup="true"
+                      android:label="MLBB AI Draft"
+                      android:supportsRtl="true"
+                      android:theme="@android:style/Theme.Material.NoActionBar">
+
+                      <activity
+                          android:name=".ui.MainActivity"
+                          android:exported="true">
+                          <intent-filter>
+                              <action android:name="android.intent.action.MAIN" />
+                              <category android:name="android.intent.category.LAUNCHER" />
+                          </intent-filter>
+                      </activity>
+
+                      <service
+                          android:name=".service.FloatingDraftService"
+                          android:enabled="true"
+                          android:exported="false"
+                          android:foregroundServiceType="mediaProjection" />
+                  </application>
+              </manifest>
+          """)
+
+          write_file("app/src/main/java/com/mlbb/aidraft/domain/model/DraftModels.kt", """
+              package com.mlbb.aidraft.domain.model
+
+              data class RecognizedHeroSlot(
+                  val slotIndex: Int,
+                  val isAlly: Boolean,
+                  val heroId: Int?,
+                  val heroName: String,
+                  val confidence: Float,
+                  val role: String = "Unknown"
+              )
+
+              data class CounterRecommendation(
+                  val heroName: String,
+                  val role: String,
+                  val damageType: String,
+                  val score: Int,
+                  val reason: String
+              )
+
+              data class DraftAnalysisResult(
+                  val allyHeroes: List<RecognizedHeroSlot>,
+                  val enemyHeroes: List<RecognizedHeroSlot>,
+                  val missingRoles: List<String>,
+                  val allyDamageProfile: String,
+                  val allyCrowdControlRating: String,
+                  val teamSynergyNote: String,
+                  val recommendations: List<CounterRecommendation>,
+                  val isAiGenerated: Boolean = false
+              )
+          """)
+
+          write_file("app/src/main/java/com/mlbb/aidraft/data/local/HeroEntity.kt", """
+              package com.mlbb.aidraft.data.local
+
+              import androidx.room.Entity
+              import androidx.room.PrimaryKey
+
+              @Entity(tableName = "heroes")
+              data class HeroEntity(
+                  @PrimaryKey val id: Int,
+                  val name: String,
+                  val role: String,
+                  val portraitPath: String,
+                  val portraitHash: Long,
+                  val counterHeroIds: String,
+                  val synergyHeroIds: String,
+                  val damageType: String,
+                  val crowdControl: Int,
+                  val difficulty: Int
+              )
+          """)
+
+          write_file("app/src/main/java/com/mlbb/aidraft/data/local/HeroDao.kt", """
+              package com.mlbb.aidraft.data.local
+
+              import androidx.room.Dao
+              import androidx.room.Insert
+              import androidx.room.OnConflictStrategy
+              import androidx.room.Query
+
+              @Dao
+              interface HeroDao {
+                  @Query("SELECT * FROM heroes ORDER BY name ASC")
+                  suspend fun getAllHeroes(): List<HeroEntity>
+
+                  @Insert(onConflict = OnConflictStrategy.REPLACE)
+                  suspend fun insertAll(heroes: List<HeroEntity>)
+
+                  @Query("DELETE FROM heroes")
+                  suspend fun clearAll()
+
+                  @Query("SELECT COUNT(*) FROM heroes")
+                  suspend fun getCount(): Int
+              }
+          """)
+
+          write_file("app/src/main/java/com/mlbb/aidraft/data/local/AppDatabase.kt", """
+              package com.mlbb.aidraft.data.local
+
+              import android.content.Context
+              import androidx.room.Database
+              import androidx.room.Room
+              import androidx.room.RoomDatabase
+
+              @Database(entities = [HeroEntity::class], version = 1, exportSchema = false)
+              abstract class AppDatabase : RoomDatabase() {
+                  abstract fun heroDao(): HeroDao
+
+                  companion object {
+                      @Volatile
+                      private var INSTANCE: AppDatabase? = null
+
+                      fun getInstance(context: Context): AppDatabase {
+                          return INSTANCE ?: synchronized(this) {
+                              val instance = Room.databaseBuilder(
+                                  context.applicationContext,
+                                  AppDatabase::class.java,
+                                  "mlbb_draft.db"
+                              ).build()
+                              INSTANCE = instance
+                              instance
+                          }
+                      }
+
+                      fun getInitialMetaHeroes(): List<HeroEntity> = listOf(
+                          HeroEntity(101, "Fanny", "Jungler,Assassin", "portraits/fanny.png", 5368074746368974932L, "201,202,302", "501,503", "Physical", 2, 10),
+                          HeroEntity(102, "Hayabusa", "Jungler,Assassin", "portraits/hayabusa.png", 7750180909692780818L, "201,202,302", "201,503", "Physical", 3, 8),
+                          HeroEntity(201, "Novaria", "Mid Lane,Mage", "portraits/novaria.png", 3196041772663042864L, "304,401", "101,102,301", "Magic", 4, 6),
+                          HeroEntity(202, "Xavier", "Mid Lane,Mage", "portraits/xavier.png", 9086942254822850585L, "401,501", "301,501", "Magic", 8, 5),
+                          HeroEntity(301, "Brody", "Gold Lane,Marksman", "portraits/brody.png", 4439451120566039809L, "101,102", "401,501", "Physical", 6, 4),
+                          HeroEntity(302, "Irithel", "Gold Lane,Marksman", "portraits/irithel.png", 5659381845238370341L, "401,501", "501,503", "Physical", 2, 4),
+                          HeroEntity(304, "Karrie", "Gold Lane,Marksman", "portraits/karrie.png", 4210474390328428297L, "401,501,502", "501,503", "True", 2, 5),
+                          HeroEntity(401, "Fredrinn", "EXP Lane,Jungler,Tank,Fighter", "portraits/fredrinn.png", 6858569713163011938L, "101,102", "201,202,301", "Physical", 9, 4),
+                          HeroEntity(501, "Hylos", "Roam,EXP Lane,Tank", "portraits/hylos.png", 1895310339498526216L, "101,102", "202,301,302", "Magic", 9, 2),
+                          HeroEntity(502, "Khufra", "Roam,Tank", "portraits/khufra.png", 6601500757761127984L, "101,102", "201,202,301", "Magic", 10, 7),
+                          HeroEntity(503, "Angela", "Roam,Support", "portraits/angela.png", 3421690837497962772L, "401,501", "101,102,401", "Magic", 5, 3)
+                      )
+                  }
+              }
+          """)
+
+          write_file("app/src/main/java/com/mlbb/aidraft/data/remote/HeroSyncRepository.kt", """
+              package com.mlbb.aidraft.data.remote
+
+              import com.google.gson.Gson
+              import com.google.gson.reflect.TypeToken
+              import com.mlbb.aidraft.data.local.AppDatabase
+              import com.mlbb.aidraft.data.local.HeroDao
+              import com.mlbb.aidraft.data.local.HeroEntity
+              import kotlinx.coroutines.Dispatchers
+              import kotlinx.coroutines.withContext
+              import java.net.HttpURLConnection
+              import java.net.URL
+
+              class HeroSyncRepository(private val heroDao: HeroDao) {
+                  suspend fun ensureSeeded() = withContext(Dispatchers.IO) {
+                      if (heroDao.getCount() == 0) {
+                          heroDao.insertAll(AppDatabase.getInitialMetaHeroes())
+                      }
+                  }
+
+                  suspend fun syncFromRemoteJson(rawJsonUrl: String): Result<Int> = withContext(Dispatchers.IO) {
+                      try {
+                          val connection = (URL(rawJsonUrl).openConnection() as HttpURLConnection).apply {
+                              requestMethod = "GET"
+                              connectTimeout = 8000
+                              readTimeout = 8000
+                          }
+                          if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                              val jsonText = connection.inputStream.bufferedReader().use { it.readText() }
+                              val listType = object : TypeToken<List<HeroEntity>>() {}.type
+                              val updatedHeroes: List<HeroEntity> = Gson().fromJson(jsonText, listType)
+                              heroDao.clearAll()
+                              heroDao.insertAll(updatedHeroes)
+                              Result.success(updatedHeroes.size)
+                          } else {
+                              Result.failure(Exception("HTTP \\${connection.responseCode}"))
+                          }
+                      } catch (e: Exception) {
+                          Result.failure(e)
+                      }
+                  }
+              }
+          """)
+
+          write_file("app/src/main/java/com/mlbb/aidraft/domain/vision/HeroRecognizer.kt", """
+              package com.mlbb.aidraft.domain.vision
+
+              import android.graphics.Bitmap
+              import android.graphics.Color
+              import com.google.mlkit.vision.common.InputImage
+              import com.google.mlkit.vision.text.TextRecognition
+              import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+              import com.mlbb.aidraft.data.local.HeroEntity
+              import com.mlbb.aidraft.domain.model.RecognizedHeroSlot
+              import kotlinx.coroutines.tasks.await
+              import kotlin.math.max
+              import kotlin.math.min
+
+              class HeroRecognizer {
+                  private val ocrClient = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+                  companion object {
+                      private const val CONFIDENCE_THRESHOLD = 0.72f
+                  }
+
+                  suspend fun recognizeDraftScreen(
+                      fullScreenshot: Bitmap,
+                      heroDatabase: List<HeroEntity>
+                  ): Pair<List<RecognizedHeroSlot>, List<RecognizedHeroSlot>> {
+                      val allies = mutableListOf<RecognizedHeroSlot>()
+                      val enemies = mutableListOf<RecognizedHeroSlot>()
+                      val slotYFractions = listOf(0.16f, 0.29f, 0.42f, 0.55f, 0.68f)
+
+                      for (i in 0 until 5) {
+                          val crop = cropNormalized(fullScreenshot, 0.01f, slotYFractions[i], 0.14f, 0.11f)
+                          allies.add(identifySingleSlot(crop, i, true, heroDatabase))
+                      }
+                      for (i in 0 until 5) {
+                          val crop = cropNormalized(fullScreenshot, 0.85f, slotYFractions[i], 0.14f, 0.11f)
+                          enemies.add(identifySingleSlot(crop, i + 5, false, heroDatabase))
+                      }
+                      return Pair(allies, enemies)
+                  }
+
+                  private suspend fun identifySingleSlot(
+                      slotBitmap: Bitmap,
+                      slotIndex: Int,
+                      isAlly: Boolean,
+                      heroDatabase: List<HeroEntity>
+                  ): RecognizedHeroSlot {
+                      val detectedText = runOcrOnSlot(slotBitmap)
+                      var bestHero: HeroEntity? = null
+                      var highestConfidence = 0.0f
+
+                      if (detectedText.isNotBlank()) {
+                          for (hero in heroDatabase) {
+                              val textSim = calculateNameSimilarity(detectedText, hero.name)
+                              if (textSim > highestConfidence) {
+                                  highestConfidence = textSim
+                                  bestHero = hero
+                              }
+                          }
+                      }
+
+                      val slotHash = computeDHash64(slotBitmap)
+                      for (hero in heroDatabase) {
+                          val visualSim = compareDHashSimilarity(slotHash, hero.portraitHash)
+                          val combinedScore = if (bestHero?.id == hero.id) {
+                              max(highestConfidence, (highestConfidence * 0.6f) + (visualSim * 0.4f))
+                          } else {
+                              visualSim
+                          }
+                          if (combinedScore > highestConfidence) {
+                              highestConfidence = combinedScore
+                              bestHero = hero
+                          }
+                      }
+
+                      return if (bestHero != null && highestConfidence >= CONFIDENCE_THRESHOLD) {
+                          RecognizedHeroSlot(slotIndex, isAlly, bestHero.id, bestHero.name, highestConfidence, bestHero.role)
+                      } else {
+                          RecognizedHeroSlot(slotIndex, isAlly, null, "Unknown Hero", highestConfidence, "Unknown")
+                      }
+                  }
+
+                  private suspend fun runOcrOnSlot(bitmap: Bitmap): String {
+                      return try {
+                          val image = InputImage.fromBitmap(bitmap, 0)
+                          val result = ocrClient.process(image).await()
+                          result.textBlocks.joinToString(" ") { it.text }.trim()
+                      } catch (e: Exception) {
+                          ""
+                      }
+                  }
+
+                  fun computeDHash64(bitmap: Bitmap): Long {
+                      val resized = Bitmap.createScaledBitmap(bitmap, 9, 8, true)
+                      var hash = 0L
+                      var bitIndex = 0
+                      for (y in 0 until 8) {
+                          for (x in 0 until 8) {
+                              val leftLum = getLuminance(resized.getPixel(x, y))
+                              val ri
