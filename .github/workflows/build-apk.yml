@@ -15,25 +15,28 @@ jobs:
 
       - name: Unzip Project Jika Ada ZIP
         run: |
+          set -x
           ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
           if [ -n "$ZIP_FILE" ]; then
             echo "Unzipping $ZIP_FILE"
+            rm -rf temp_unzip
+            mkdir temp_unzip
             unzip -o "$ZIP_FILE" -d temp_unzip
-            shopt -s dotglob
-            mv temp_unzip/* . 2>/dev/null || true
-            mv temp_unzip/.* . 2>/dev/null || true
+            # Pindahkan semua fail ke root
+            cp -r temp_unzip/. .
             rm -rf temp_unzip "$ZIP_FILE"
           fi
-          # Jika gradlew masih dalam subfolder
+          # Cari gradlew jika masih dalam subfolder
           if [ ! -f "./gradlew" ]; then
-            DIR=$(find . -maxdepth 3 -name "gradlew" | head -n 1 | xargs dirname)
-            if [ -n "$DIR" ] && [ "$DIR" != "." ]; then
-              echo "Pindah dari $DIR ke root"
-              cp -r $DIR/* . 2>/dev/null || true
-              cp -r $DIR/.* . 2>/dev/null || true
+            GRADLEW_PATH=$(find . -type f -name "gradlew" | head -n 1)
+            if [ -n "$GRADLEW_PATH" ]; then
+              PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+              echo "Projek dijumpai di $PROJECT_DIR"
+              cp -r "$PROJECT_DIR"/. .
             fi
           fi
           ls -la
+          ls -la app/ || true
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -47,13 +50,13 @@ jobs:
       - name: Install SDK Platform & Accept Licenses
         run: |
           yes | sdkmanager --licenses
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "platforms;android-33"
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v3
 
       - name: Beri Permission Gradle
-        run: chmod +x ./gradlew
+        run: chmod +x ./gradlew || chmod +x ./gradlew.bat || true
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
@@ -63,4 +66,4 @@ jobs:
         with:
           name: MLBB-Draft-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error 
+          if-no-files-found: error
