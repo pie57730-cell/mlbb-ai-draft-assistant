@@ -11,42 +11,74 @@ jobs:
     steps:
       - name: Checkout Kod Repository
         uses: actions/checkout@v4
-      - name: Unzip Project Jika Ada ZIP
+
+      - name: Unzip Dan Cari Projek Sebenar
         run: |
+          echo "=== FAIL SEBELUM UNZIP ==="
+          ls -la
           ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
           if [ -n "$ZIP_FILE" ]; then
+            echo "Jumpa ZIP: $ZIP_FILE"
             rm -rf temp_unzip && mkdir temp_unzip
             unzip -o "$ZIP_FILE" -d temp_unzip
             cp -r temp_unzip/. .
             rm -rf temp_unzip "$ZIP_FILE"
+          else
+            echo "Tiada ZIP di root"
           fi
-          if [ ! -f "./gradlew" ]; then
-            GRADLEW_PATH=$(find . -type f -name "gradlew" | head -n 1)
-            if [ -n "$GRADLEW_PATH" ]; then
-              PROJECT_DIR=$(dirname "$GRADLEW_PATH")
-              cp -r "$PROJECT_DIR"/. .
-            fi
+          echo "=== SEMUA FAIL DALAM REPO ==="
+          find . -maxdepth 4 -type f | head -n 100
+          # Cari folder yang ada settings.gradle atau app/build.gradle - itu folder projek sebenar
+          PROJECT_DIR=$(find . -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1 | xargs dirname 2>/dev/null || true)
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR=$(find . -name "build.gradle" -o -name "build.gradle.kts" | head -n 1 | xargs dirname 2>/dev/null || true)
           fi
+          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
+            PROJECT_DIR="."
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Projek sebenar di: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+          ls -la "$PROJECT_DIR/app" || echo "Tiada folder app di $PROJECT_DIR"
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-      - name: Guna Android SDK Yang Dah Ada Dalam Runner
+
+      - name: Setup Gradle Tanpa Bergantung Pada gradlew
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Build Debug APK - Auto Guna gradlew ATAU gradle
         run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
-          ls $ANDROID_HOME
+          cd "$PROJECT_DIR"
+          echo "Build dari: $(pwd)"
+          ls -la
+          # Accept licenses
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
-      - name: Setup Gradle Cache
-        uses: gradle/actions/setup-gradle@v3
-      - name: Beri Permission Gradle
-        run: chmod +x ./gradlew
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+          if [ -f "./gradlew" ]; then
+            echo "Guna gradlew"
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace --no-daemon
+          else
+            echo "gradlew TIADA - Guna gradle terus"
+            gradle assembleDebug --stacktrace --no-daemon
+          fi
+
+      - name: Cari Dan Upload APK
+        run: |
+          find . -name "*.apk" | head -n 20
+          APK_PATH=$(find . -name "app-debug.apk" | head -n 1)
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "APK: $APK_PATH"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MLBB-Draft-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
